@@ -24,11 +24,13 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.ServiceLoader;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 import javax.inject.Provider;
 
@@ -231,33 +233,43 @@ public class EmbeddableComponentManager implements NamespacedComponentManager, D
     @SuppressWarnings("unchecked")
     public <T> Map<String, T> getInstanceMap(Type roleType) throws ComponentLookupException
     {
-        Map<String, T> components = new HashMap<>();
-
-        Map<String, ComponentEntry<?>> entries = this.componentEntries.get(roleType);
-
-        // Add local components
-        if (entries != null) {
-            for (Map.Entry<String, ComponentEntry<?>> entry : entries.entrySet()) {
+        Map<String, ComponentEntry<?>> entries = new HashMap<>();
+        if (this.componentEntries.containsKey(roleType)) {
+            entries.putAll(this.componentEntries.get(roleType));
+            for (ComponentEntry<?> value : entries.values()) {
                 try {
-                    components.put(entry.getKey(), getComponentInstance((ComponentEntry<T>) entry.getValue()));
+                    getComponentInstance(value); // force loading the instance
                 } catch (Exception e) {
                     throw new ComponentLookupException(
-                        "Failed to lookup component with type [" + roleType + "] and hint [" + entry.getKey() + "]", e);
+                        String.format("Failed to lookup component with type [%s] and hint [%s]",
+                            roleType, value.descriptor.getRoleHint())
+                        , e);
                 }
             }
         }
 
         // Add parent components
         if (getParent() != null) {
-            // If the hint already exists in the children Component Manager then don't add the one from the parent.
-            for (Map.Entry<String, T> entry : getParent().<T>getInstanceMap(roleType).entrySet()) {
-                if (!components.containsKey(entry.getKey())) {
-                    components.put(entry.getKey(), entry.getValue());
+            for (ComponentDescriptor<T> componentDescriptor : getParent().<T>getComponentDescriptorList(roleType)) {
+                String roleHint = componentDescriptor.getRoleHint();
+                if (!entries.containsKey(roleHint)) {
+                    T instance = getParent().getInstance(roleType, roleHint);
+                    entries.put(roleHint, new ComponentEntry<>(componentDescriptor, instance));
                 }
             }
         }
 
-        return components;
+        // Return a map ordered by the role type priority
+        return entries.entrySet().stream()
+            // Ordering of the entries
+            .sorted(Comparator.comparingInt(e -> e.getValue().descriptor.getRoleTypePriority()))
+
+            // Build a new map
+            .collect(Collectors.toMap(
+                Map.Entry::getKey, // We keep the key
+                e -> (T) e.getValue().instance,
+                (e1, e2) -> e1,
+                LinkedHashMap::new));
     }
 
     private ComponentEntry<?> getComponentEntry(Type role, String hint)
